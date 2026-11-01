@@ -150,13 +150,17 @@ def verify_key(key, c0):
 
 
 def find_key_from_memory(c0, wxid):
-    """内存扫描 seed -> 派生 -> C0 验证, 返回 (seed, key) 或 None (并行验证)"""
+    """内存扫描 seed -> 派生 -> C0 验证, 返回 (seed, key) 或 None (并行验证)
+    wxid: 字符串或候选列表（多账号目录后缀不确定时传列表）"""
+    wxids = list(dict.fromkeys(wxid if isinstance(wxid, (list, tuple)) else [wxid]))
+    print(f"[*] wxid candidates: {wxids}")
     seeds = scan_seeds_from_memory()
-    print(f"[*] Verifying {len(seeds)} candidates (wxid={wxid})...")
+    print(f"[*] Verifying {len(seeds)} candidates (wxid={wxids[0]})...")
     from concurrent.futures import ThreadPoolExecutor, as_completed
     n = min(16, (os.cpu_count() or 8))
     with ThreadPoolExecutor(max_workers=n) as pool:
-        futs = {pool.submit(_verify_one, s, wxid, c0): s for s in sorted(seeds)}
+        futs = {pool.submit(_verify_one, s, w, c0): s
+                for s in sorted(seeds) for w in wxids}
         for fut in as_completed(futs):
             r = fut.result()
             if r:
@@ -167,7 +171,7 @@ def find_key_from_memory(c0, wxid):
 def _verify_one(seed, wxid, c0):
     key = derive_key(seed, wxid)
     if verify_key(key, c0):
-        return seed, key
+        return seed, key, wxid
     return None
 
 
@@ -184,8 +188,22 @@ def find_data_dir():
 
 
 def auto_wxid(data_dir):
-    name = os.path.basename(data_dir)
-    return name[:-5] if name.endswith("_b487") else name
+    name = os.path.basename(os.path.normpath(data_dir))
+    # 4.x 多账号目录后缀 _xxxx（4位十六进制，如 _b487 / _0b1b）
+    return re.sub(r'_[0-9a-fA-F]{4}$', '', name)
+
+
+def wxid_candidates(data_dir):
+    """目录名 → wxid 候选列表（原名 / 剥后缀 / 去 wxid_ 前缀），逐一参与 key 验证"""
+    name = os.path.basename(os.path.normpath(data_dir))
+    cands = [name]
+    stripped = re.sub(r'_[0-9a-fA-F]{4}$', '', name)
+    if stripped and stripped != name:
+        cands.append(stripped)
+    for c in list(cands):
+        if c.startswith("wxid_"):
+            cands.append(c[len("wxid_"):])
+    return list(dict.fromkeys(cands))
 
 
 def find_emoticon_dir(data_dir):
@@ -1058,13 +1076,13 @@ def run_images(data_dir, wxid, emo_dir, out_dir, seed=None):
                     break
             if c0:
                 break
-        found = find_key_from_memory(c0, wxid) if c0 else None
+        found = find_key_from_memory(c0, wxid_candidates(data_dir)) if c0 else None
         if not found:
             print("[!] Memory scan found no seed; run WeChat first or use --seed")
             return None
-        seed, _ = found
-        print(f"[+] HIT seed={seed}")
-    v2_export(data_dir, out_dir, seed, wxid)
+        seed, _, wxmatch = found
+        print(f"[+] HIT seed={seed} wxid={wxmatch}")
+    v2_export(data_dir, out_dir, seed, wxmatch)
     print(f"[OK] Done in {time.time()-t0:.0f}s, output: {out_dir}")
 
 
@@ -1093,12 +1111,12 @@ def run_export(data_dir, wxid, emo_dir, out_dir="emoticon_export", key_hex=None,
         key = bytes.fromhex(key_hex)
         print(f"[*] Using provided key: {key.hex()}")
     else:
-        found = find_key_from_memory(c0, wxid) if not seed else None
+        found = find_key_from_memory(c0, wxid_candidates(data_dir)) if not seed else None
         if not found:
             print("[!] Memory scan found no emoticon key")
             print("    Note: WeChat must be running; or use --key <hex> offline")
             return None
-        seed, key = found
+        seed, key, _ = found
         print(f"\n[+] HIT! seed={seed}")
         print(f"[+] emoticon key = {key.hex()}")
         print(f"[+] md5 input = {seed}{wxid}EMOTICON")
@@ -1303,19 +1321,19 @@ def tool_show_keys(data_dir, wxid, emo_dir):
     if not c0:
         print("[!] No emoticon file to verify against (WeChat must be running)")
         return None
-    found = find_key_from_memory(c0, wxid)
+    found = find_key_from_memory(c0, wxid_candidates(data_dir))
     if not found:
         print("[!] Memory scan found no seed (WeChat must be running)")
         return None
-    seed, key = found
-    v2key = hashlib.md5(f"{seed}{wxid}".encode()).hexdigest()[:16]
-    print(f"\n[+] seed        = {seed} (md5 input: {seed}{wxid}EMOTICON)")
+    seed, key, wxmatch = found
+    v2key = hashlib.md5(f"{seed}{wxmatch}".encode()).hexdigest()[:16]
+    print(f"\n[+] seed        = {seed} (md5 input: {seed}{wxmatch}EMOTICON)")
     print(f"[+] emoticon key = {key.hex()} (AES-128-CBC key=IV)")
-    print(f"[+] V2 image key = {v2key} (md5({seed}{wxid})[:16])")
+    print(f"[+] V2 image key = {v2key} (md5({seed}{wxmatch})[:16])")
     # 保存到 keys.txt
     with open("wechat_keys.txt", "w", encoding="utf-8") as f:
         f.write(f"seed = {seed}\n")
-        f.write(f"wxid = {wxid}\n")
+        f.write(f"wxid = {wxmatch}\n")
         f.write(f"emoticon_key = {key.hex()}\n")
         f.write(f"v2_image_key = {v2key}\n")
     print(f"[*] Saved wechat_keys.txt ({time.time()-t0:.0f}s)")
